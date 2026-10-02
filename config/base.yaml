@@ -125,12 +125,14 @@ es_manager:
   train:
     env_groups: 8
     group_size: 16
+    group_size_raw: ${.group_size}
     env_configs:
       tags: [CoordSokoban]
       n_groups: [8]
   val:
     env_groups: 32
     group_size: 16
+    group_size_raw: ${.group_size}
     env_configs:
       tags: [CoordSokoban]
       n_groups: [32]

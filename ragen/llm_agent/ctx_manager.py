@@ -135,13 +135,13 @@ class ContextManager:
 
         tags = self.es_cfg.env_configs.tags
         n_groups = self.es_cfg.env_configs.n_groups
-        group_size = self.es_cfg.group_size
+        group_size_raw = getattr(self.es_cfg, "group_size_raw", self.es_cfg.group_size)
 
         cur_group = 0
         for env_tag, n_group in zip(tags, n_groups):
             env_instruction = prefixes[env_tag]
-            start_idx = cur_group * group_size
-            end_idx = (cur_group + n_group) * group_size
+            start_idx = cur_group * group_size_raw
+            end_idx = (cur_group + n_group) * group_size_raw
             for i in range(start_idx, end_idx):
                 prefix_lookup[i] = env_instruction
                 env_config_lookup[i] = env_config_lookup[env_tag]

@@ -1,0 +1,11 @@
+defaults:
+  - webshop
+  - _self_
+
+trainer:
+  experiment_name: tsr_best_of_n_webshop
+  default_local_dir: results/checkpoints/tsr_best_of_n_webshop
+
+es_manager:
+  train:
+    group_size_raw: 32

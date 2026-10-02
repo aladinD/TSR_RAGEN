@@ -1,0 +1,11 @@
+defaults:
+  - frozen_lake
+  - _self_
+
+trainer:
+  experiment_name: tsr_best_of_n_frozen_lake
+  default_local_dir: results/checkpoints/tsr_best_of_n_frozen_lake
+
+es_manager:
+  train:
+    group_size_raw: 32

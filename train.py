@@ -117,6 +117,12 @@ def add_dependency_and_validate_config(config):
         "response mask is currently only supported for qwen models"
     assert len(str(config.system.CUDA_VISIBLE_DEVICES).split(',')) == config.trainer.n_gpus_per_node, \
         f"CUDA_VISIBLE_DEVICES ({config.system.CUDA_VISIBLE_DEVICES}) must have the same number of GPUs as n_gpus_per_node ({config.trainer.n_gpus_per_node})"
+    train_group_size_raw = getattr(config.es_manager.train, "group_size_raw", config.es_manager.train.group_size)
+    val_group_size_raw = getattr(config.es_manager.val, "group_size_raw", config.es_manager.val.group_size)
+    assert train_group_size_raw >= config.es_manager.train.group_size, \
+        f"group_size_raw ({train_group_size_raw}) must be >= group_size ({config.es_manager.train.group_size}) for train"
+    assert val_group_size_raw >= config.es_manager.val.group_size, \
+        f"group_size_raw ({val_group_size_raw}) must be >= group_size ({config.es_manager.val.group_size}) for val"
     context_window_mode = getattr(config.agent_proxy, "context_window_mode", "full")
     if context_window_mode in ("single_turn", "limited_multi_turn"):
         # In these modes, each turn becomes a separate sample, so we need more samples

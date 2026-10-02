@@ -444,6 +444,66 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             compute_log_prob=self.actor_rollout_wg.compute_log_prob,
         )
 
+    def _apply_tsr_best_of_n(self, batch: DataProto) -> tuple[DataProto, dict]:
+        effective_size = self.config.es_manager.train.group_size
+        raw_size = getattr(self.config.es_manager.train, "group_size_raw", effective_size)
+        if raw_size <= effective_size:
+            return batch, {}
+
+        scores = batch.batch["original_rm_scores"].sum(dim=-1)
+        group_ids = torch.tensor(batch.non_tensor_batch["group_ids"], device=scores.device)
+        mask = torch.zeros(len(scores), dtype=torch.bool, device=scores.device)
+
+        if "episode_ids" in batch.non_tensor_batch:
+            episode_ids = batch.non_tensor_batch["episode_ids"]
+            episode_to_indices = {}
+            for index, episode_id in enumerate(episode_ids):
+                episode_to_indices.setdefault(int(episode_id), []).append(index)
+
+            episode_group = {
+                episode_id: int(group_ids[indices[0]])
+                for episode_id, indices in episode_to_indices.items()
+            }
+            episode_reward = {
+                episode_id: scores[indices[0]]
+                for episode_id, indices in episode_to_indices.items()
+            }
+            for group_id in torch.unique(group_ids).tolist():
+                group_episodes = [
+                    episode_id
+                    for episode_id, candidate_group in episode_group.items()
+                    if candidate_group == group_id
+                ]
+                if not group_episodes:
+                    continue
+                rewards = torch.stack([episode_reward[episode_id] for episode_id in group_episodes])
+                selected = torch.topk(rewards, min(effective_size, rewards.numel())).indices.tolist()
+                for selected_index in selected:
+                    for batch_index in episode_to_indices[group_episodes[selected_index]]:
+                        mask[batch_index] = True
+        else:
+            for group_id in torch.unique(group_ids).tolist():
+                indices = torch.nonzero(group_ids == group_id, as_tuple=False).squeeze(-1)
+                if indices.numel() == 0:
+                    continue
+                selected = torch.topk(scores[indices], min(effective_size, indices.numel())).indices
+                mask[indices[selected]] = True
+
+        mask_cpu = mask.cpu()
+        batch.batch = batch.batch[mask_cpu]
+        numpy_mask = mask_cpu.numpy()
+        for key, value in batch.non_tensor_batch.items():
+            if isinstance(value, np.ndarray):
+                batch.non_tensor_batch[key] = value[numpy_mask]
+            else:
+                batch.non_tensor_batch[key] = [item for item, keep in zip(value, numpy_mask) if keep]
+
+        return batch, {
+            "rollout/tsr_best_of_n_raw_group_size": raw_size,
+            "rollout/tsr_best_of_n_effective_group_size": effective_size,
+            "rollout/tsr_best_of_n_kept": int(mask_cpu.sum().item()),
+        }
+
 
     def _save_checkpoint(self):
         """
@@ -573,8 +633,11 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                 with marked_timer("gen", timing_raw):
                     batch = self.agent_proxy.rollout(batch, val=False)
 
-                    # Filter first, then adjust batch size
-                    batch, metrics = self.rollout_filter.filter(batch)
+                    metrics = {}
+                    batch, tsr_metrics = self._apply_tsr_best_of_n(batch)
+                    metrics.update(tsr_metrics)
+                    batch, filter_metrics = self.rollout_filter.filter(batch)
+                    metrics.update(filter_metrics)
 
                     # Adjust batch size to be divisible by num_groups, ppo_mini_batch_size, and n_gpus
                     num_groups = self.config.es_manager.train.env_groups

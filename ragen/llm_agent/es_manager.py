@@ -34,7 +34,9 @@ class EnvStateManager:
         self.mode = mode
         self.config = getattr(self.sys_config.es_manager, mode)
         self.env_groups = int(self.config.env_groups)
-        self.group_size = self.config.group_size
+        self.group_size_effective = self.config.group_size
+        self.group_size_raw = getattr(self.config, "group_size_raw", self.group_size_effective)
+        self.group_size = self.group_size_raw
         seed_cfg = getattr(self.sys_config, "seed", None)
         if seed_cfg is not None:
             self.base_seed = seed_cfg.get(mode, None)
