@@ -1,0 +1,7 @@
+defaults:
+  - base
+  - _self_
+
+trainer:
+  experiment_name: sokoban
+  default_local_dir: results/checkpoints/sokoban

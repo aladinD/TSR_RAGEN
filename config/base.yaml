@@ -1,0 +1,145 @@
+defaults:
+  - ppo_trainer
+  - envs
+  - _self_
+
+system:
+  CUDA_VISIBLE_DEVICES: "0"
+
+seed:
+  train: 10000
+  val: 123
+
+micro_batch_size_per_gpu: 4
+ppo_mini_batch_size: 32
+model_path: Qwen/Qwen2.5-3B-Instruct
+enable_response_mask: true
+grpo_advantage_length_weight: false
+
+lora:
+  rank: 0
+  alpha: 64
+  target_modules: all-linear
+
+actor_rollout_ref:
+  model:
+    path: ${model_path}
+    lora_rank: ${lora.rank}
+    lora_alpha: ${lora.alpha}
+    target_modules: ${lora.target_modules}
+  actor:
+    ppo_mini_batch_size: ${ppo_mini_batch_size}
+    ppo_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+    use_ref: true
+    entropy_coeff: 0.001
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    kl_loss_type: kl
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    grpo_advantage_length_weight: ${grpo_advantage_length_weight}
+    optim:
+      betas: [0.9, 0.999]
+      lr: 1e-6
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+  rollout:
+    name: vllm
+    log_prob_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+    tensor_model_parallel_size: 1
+    max_model_len: 3600
+    prompt_length: 1
+    response_length: 400
+    gpu_memory_utilization: 0.5
+    max_num_batched_tokens: 8192
+    temperature: 1.0
+    rollout_filter_ratio: 0.25
+    rollout_filter_type: largest
+    rollout_filter_metric: reward_variance
+    enforce_eager: true
+    free_cache_engine: true
+    val_kwargs:
+      do_sample: true
+      temperature: 0.5
+
+critic:
+  ppo_mini_batch_size: ${ppo_mini_batch_size}
+  ppo_micro_batch_size_per_gpu: ${micro_batch_size_per_gpu}
+  model:
+    path: ${model_path}
+    lora_rank: ${lora.rank}
+    lora_alpha: ${lora.alpha}
+    target_modules: ${lora.target_modules}
+  optim:
+    betas: [0.9, 0.999]
+    lr: 1e-5
+
+data:
+  max_prompt_length: null
+  max_response_length: null
+  train_batch_size: null
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  high_level_gamma: 0.95
+  adv_estimator: gae
+  bi_level_gae: false
+  kl_penalty: kl
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+
+trainer:
+  project_name: tsr_ragen
+  experiment_name: sokoban
+  local_log_dir: results
+  default_local_dir: results/checkpoints/sokoban
+  save_freq: 100
+  total_training_steps: 200
+  validation_steps: 1
+  val_before_train: true
+  n_gpus_per_node: 1
+  test_freq: 10
+  generations_to_log_to_wandb:
+    val: 20
+  logger: [console]
+  max_actor_ckpt_to_keep: 1
+  max_critic_ckpt_to_keep: 1
+
+agent_proxy:
+  context_window_mode: full
+  max_context_window: -1
+  batch_adjust_mode: copy
+  max_turn: 5
+  action_sep: "||"
+  max_actions_per_turn: 2
+  use_turn_scores: false
+  enable_think: true
+  reward_normalization:
+    grouping: state
+    method: identity
+
+es_manager:
+  format_penalty: -0.1
+  train:
+    env_groups: 8
+    group_size: 16
+    env_configs:
+      tags: [CoordSokoban]
+      n_groups: [8]
+  val:
+    env_groups: 32
+    group_size: 16
+    env_configs:
+      tags: [CoordSokoban]
+      n_groups: [32]
+
+ctx_manager:
+  generation:
+    gen_config:
+      response_length: ${actor_rollout_ref.rollout.response_length}
+      temperature: ${actor_rollout_ref.rollout.temperature}
+      top_p: ${actor_rollout_ref.rollout.top_p}
+      top_k: ${actor_rollout_ref.rollout.top_k}
+      kwargs: null

@@ -1,0 +1,17 @@
+defaults:
+  - base
+  - _self_
+
+trainer:
+  experiment_name: frozen_lake
+  default_local_dir: results/checkpoints/frozen_lake
+
+es_manager:
+  train:
+    env_configs:
+      tags: [CoordFrozenLake]
+      n_groups: [8]
+  val:
+    env_configs:
+      tags: [CoordFrozenLake]
+      n_groups: [32]

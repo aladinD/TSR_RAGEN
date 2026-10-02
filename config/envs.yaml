@@ -1,0 +1,46 @@
+custom_envs:
+  CoordSokoban:
+    env_type: sokoban
+    max_actions_per_traj: 10
+    env_instruction: >-
+      You are solving a Sokoban puzzle. Push every box onto a target without
+      pulling boxes or pushing them through walls. The observation contains a
+      symbol grid and zero-indexed coordinates. Return actions in the form
+      <answer>Right || Right || Up</answer>.
+    max_tokens: 120
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      dim_x: 6
+      dim_y: 6
+      num_boxes: 1
+      max_steps: 100
+      observation_format: grid_coord
+
+  CoordFrozenLake:
+    env_type: frozen_lake
+    max_actions_per_traj: 10
+    env_instruction: >-
+      You are solving FrozenLake. Reach the goal while avoiding holes. The
+      observation contains a symbol grid and zero-indexed coordinates. The ice
+      is slippery, so movement can be stochastic. Return actions in the form
+      <answer>Left || Up || Up</answer>.
+    max_tokens: 120
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      observation_format: grid_coord
+
+  WebShop:
+    env_type: webshop
+    max_actions_per_traj: 9
+    env_instruction: >-
+      You are browsing an online shop. Search for a product matching the user
+      request, inspect the results, select required options, and buy it. Choose
+      only from the available actions. Valid actions use <answer>search[query]</answer>
+      or <answer>click[item]</answer>.
+    max_tokens: 200
+    parallel_friendly: false
+    max_workers: 32
+    env_config:
+      dataset: small

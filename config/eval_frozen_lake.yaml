@@ -1,0 +1,22 @@
+defaults:
+  - frozen_lake
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    do_sample: false
+    dtype: bfloat16
+    disable_log_stats: false
+    enable_chunked_prefill: false
+    gpu_memory_utilization: 0.9
+    val_kwargs:
+      do_sample: false
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      logprobs: 20
+
+output:
+  dir: results/eval/frozen_lake
+  filename: rollouts.pkl
+  append_timestamp: true
