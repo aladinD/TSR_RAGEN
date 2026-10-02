@@ -1135,14 +1135,24 @@ class ContextManager:
 
         env_ids = lm_outputs.non_tensor_batch['env_ids']
         env_inputs = []
-        for env_id, response in zip(env_ids, responses):
+        n_tokens = lm_outputs.non_tensor_batch.get("n_tokens")
+        entropys = lm_outputs.non_tensor_batch.get("entropys")
+        logprob_sums = lm_outputs.non_tensor_batch.get("logprob_sums")
+        for index, (env_id, response) in enumerate(zip(env_ids, responses)):
             llm_response, actions = self._parse_response(response)
-            env_inputs.append({
+            entry = {
                 "env_id": env_id,
                 "llm_raw_response": response,
                 "llm_response": llm_response,
                 "actions": actions,
-            })
+            }
+            if n_tokens is not None:
+                entry["n_tokens"] = int(n_tokens[index])
+            if entropys is not None:
+                entry["entropys"] = float(entropys[index])
+            if logprob_sums is not None:
+                entry["score"] = float(logprob_sums[index])
+            env_inputs.append(entry)
         return env_inputs
 
     def formulate_rollouts(self, env_outputs: List[Dict]) -> DataProto:

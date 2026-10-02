@@ -53,6 +53,7 @@ actor_rollout_ref:
     gpu_memory_utilization: 0.5
     max_num_batched_tokens: 8192
     temperature: 1.0
+    n: 1
     rollout_filter_ratio: 0.25
     rollout_filter_type: largest
     rollout_filter_metric: reward_variance
@@ -61,6 +62,11 @@ actor_rollout_ref:
     val_kwargs:
       do_sample: true
       temperature: 0.5
+    beam_search: false
+    beam_candidates: 4
+    beam_keep_best: 1
+    beam_keep_worst: 0
+    beam_partial_reward_mode: sum
 
 critic:
   ppo_mini_batch_size: ${ppo_mini_batch_size}

@@ -1,5 +1,6 @@
 """State management for batched agent environments."""
 import atexit
+import copy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Union
@@ -82,6 +83,7 @@ class EnvStateManager:
                         'parallel_friendly': parallel_friendly, 'max_workers': max_workers}
                 env_list.append(entry)
             done_groups += n_group
+        self._env_id_to_index = {entry['env_id']: index for index, entry in enumerate(env_list)}
         return env_list
 
     def _register_parallel_executors(self):
@@ -362,6 +364,61 @@ class EnvStateManager:
             actions = [action.lower() for action in actions]
             mapped_actions = [rev_action_lookup[action] for action in actions if action in rev_action_lookup]
         return mapped_actions
+
+    def simulate_candidate_outcome(self, env_id: int, actions: List[str]):
+        index = self._env_id_to_index.get(env_id)
+        if index is None:
+            raise ValueError(f"Unknown env_id {env_id}")
+        if self.rollout_cache is None:
+            raise RuntimeError("Rollout cache is unavailable")
+
+        entry = self.envs[index]
+        cache = self.rollout_cache[index]
+        env_copy = type(entry['env'])(copy.deepcopy(entry['config']))
+        reset_kwargs = {"mode": self.mode}
+        if entry['status'].seed is not None:
+            reset_kwargs["seed"] = entry['status'].seed
+        env_copy.reset(**reset_kwargs)
+
+        done = False
+        for turn in cache['history']:
+            for previous_action in turn.get('actions', []):
+                _, _, done, _ = env_copy.step(previous_action)
+                if done:
+                    break
+            if done:
+                break
+
+        actions_left = max(entry['max_actions_per_traj'] - entry['status'].num_actions, 0)
+        valid_actions = self._extract_map_valid_actions(entry, actions)
+        if actions_left <= 0 or not valid_actions:
+            return {
+                "reward": -1e6,
+                "done": False,
+                "info": {},
+                "actions": [],
+                "state": self._handle_mm_state(env_copy.render()),
+            }
+
+        reward_total = 0.0
+        turn_info = {}
+        executed_actions = []
+        done = False
+        for action in valid_actions[:actions_left]:
+            _, reward, done, info = env_copy.step(action)
+            reward_total += reward
+            executed_actions.append(action)
+            turn_info.update(info)
+            if done:
+                break
+
+        return {
+            "reward": reward_total,
+            "done": done,
+            "info": turn_info,
+            "actions": executed_actions,
+            "state": self._handle_mm_state(env_copy.render()),
+        }
 
     def _handle_mm_state(self, state: Union[str, np.ndarray, list[np.ndarray]]):
         """Handle the state from the environment

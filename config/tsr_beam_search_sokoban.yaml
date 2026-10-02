@@ -1,0 +1,14 @@
+defaults:
+  - sokoban
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    beam_search: true
+    beam_candidates: 4
+    beam_keep_best: 1
+    beam_keep_worst: 0
+
+trainer:
+  experiment_name: tsr_beam_search_sokoban
+  default_local_dir: results/checkpoints/tsr_beam_search_sokoban

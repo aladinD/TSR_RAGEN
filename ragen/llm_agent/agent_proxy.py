@@ -15,6 +15,7 @@ from hydra.utils import to_absolute_path
 import numpy as np
 from omegaconf import OmegaConf, open_dict
 import wandb
+from collections import defaultdict
 
 
 
@@ -90,6 +91,14 @@ class VllmWrapperWg:
         entropys = np.array(entropys)
         n_tokens = [len(logprob_in_a_series) for logprob_in_a_series in all_logprobs]
         n_tokens = np.array(n_tokens)
+        logprob_sums = np.array([
+            sum(
+                item.logprob
+                for token_logprobs in logprob_series
+                for item in token_logprobs.values()
+            )
+            for logprob_series in all_logprobs
+        ])
 
         # get the in_group_std of the response
         lm_outputs = DataProto()
@@ -99,6 +108,7 @@ class VllmWrapperWg:
             "group_ids": lm_inputs.non_tensor_batch["group_ids"],
             "entropys": entropys,
             "n_tokens": n_tokens,
+            "logprob_sums": logprob_sums,
         }  # this is a bit hard-coded to bypass the __init__ check in DataProto
         lm_outputs.meta_info = lm_inputs.meta_info
 
@@ -225,24 +235,16 @@ class LLMAgentProxy:
             lm_inputs.meta_info["mode"] = mode
             lm_outputs: DataProto = self.generate_sequences(lm_inputs)
 
-            # calculate entropy
-            if "entropys" in lm_outputs.non_tensor_batch:
-                turn_entropy, env_ids = (
-                    lm_outputs.non_tensor_batch["entropys"],
-                    lm_outputs.non_tensor_batch["env_ids"],
-                )
-                n_tokens[env_ids] += lm_outputs.non_tensor_batch["n_tokens"]
-                entropys[env_ids] += turn_entropy
-                n_turns[env_ids] += 1
-            else:
-                # Still count a turn even if entropy was not returned
-                env_ids = lm_outputs.non_tensor_batch.get("env_ids", None)
-                if env_ids is not None:
-                    n_turns[env_ids] += 1
-
             if mode == "multiturn-end":
                 finalized = True
             env_inputs: List[Dict] = ctx_manager.get_env_inputs(lm_outputs)
+            if getattr(self.config.actor_rollout_ref.rollout, "beam_search", False):
+                env_inputs = self._select_tsr_beam_candidates(env_inputs, es_manager)
+            for candidate in env_inputs:
+                env_id = candidate["env_id"]
+                entropys[env_id] += float(candidate.get("entropys", 0.0))
+                n_tokens[env_id] += int(candidate.get("n_tokens", 0))
+                n_turns[env_id] += 1
             env_outputs: List[Dict] = es_manager.step(env_inputs)
             if len(env_outputs) == 0:  # all finished
                 if multi_turn and not finalized and last_inputs is not None:
@@ -273,6 +275,36 @@ class LLMAgentProxy:
             metrics["avg_turns"] = float(np.mean(n_turns))
 
         return rollouts
+
+    def _select_tsr_beam_candidates(
+        self,
+        env_inputs: List[Dict],
+        es_manager: EnvStateManager,
+    ) -> List[Dict]:
+        beam_config = self.config.actor_rollout_ref.rollout
+        keep_best = getattr(beam_config, "beam_keep_best", 1)
+        keep_worst = getattr(beam_config, "beam_keep_worst", 0)
+        grouped: Dict[int, List[Dict]] = defaultdict(list)
+        for candidate in env_inputs:
+            grouped[candidate["env_id"]].append(candidate)
+
+        selected_inputs = []
+        for env_id, candidates in grouped.items():
+            scored = [
+                (
+                    candidate,
+                    es_manager.simulate_candidate_outcome(
+                        env_id, candidate.get("actions", [])
+                    )["reward"],
+                )
+                for candidate in candidates
+            ]
+            scored.sort(key=lambda item: item[1], reverse=True)
+            if keep_best > 0:
+                selected_inputs.append(scored[0][0])
+            elif keep_worst > 0:
+                selected_inputs.append(scored[-1][0])
+        return selected_inputs
 
 
 def _normalize_output_cfg(config) -> Optional[Dict]:

@@ -129,6 +129,15 @@ def add_dependency_and_validate_config(config):
     assert config.algorithm.bi_level_gae == False or (not config.agent_proxy.use_turn_scores), "BI_LEVEL_GAE is enabled, but currently use_turn_scores are not correctly supported, so config.agent_proxy.use_turn_scores should be set to False" # This will be added later. Currently turn-scores are not correctly supported yet.
     config.data.train_batch_size = config.es_manager.train.env_groups * config.es_manager.train.group_size
 
+    rollout_config = config.actor_rollout_ref.rollout
+    if getattr(rollout_config, "beam_search", False):
+        candidate_count = getattr(rollout_config, "beam_candidates", 0)
+        keep_best = getattr(rollout_config, "beam_keep_best", 0)
+        keep_worst = getattr(rollout_config, "beam_keep_worst", 0)
+        assert candidate_count > 0, "beam_candidates must be positive when TSR beam search is enabled"
+        assert keep_best + keep_worst == 1, "beam_keep_best + beam_keep_worst must equal 1"
+        config.actor_rollout_ref.rollout.n = candidate_count
+
 
     return config
 
