@@ -13,6 +13,7 @@ from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from pprint import pprint
+from copy import deepcopy
 
 from verl import DataProto
 from verl.experimental.dataset.sampler import AbstractCurriculumSampler
@@ -435,6 +436,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         # create rollout filter
         rollout_cfg = self.config.actor_rollout_ref.rollout
         rollout_metric = getattr(rollout_cfg, "rollout_filter_metric", "reward_variance")
+        lookahead_cfg = getattr(self.config, "tsr_lookahead", None)
         self.rollout_filter = build_rollout_filter(
             ratio=rollout_cfg.rollout_filter_ratio,
             filter_type=rollout_cfg.rollout_filter_type,
@@ -442,6 +444,20 @@ class RayAgentTrainer(VerlRayPPOTrainer):
             group_size=self.config.es_manager.train.group_size,
             metric=rollout_metric,
             compute_log_prob=self.actor_rollout_wg.compute_log_prob,
+            lookahead_enabled=getattr(lookahead_cfg, "enabled", False),
+            lookahead_keep_ratio=getattr(lookahead_cfg, "keep_ratio", 0.25),
+            lookahead_min_keep_per_group=getattr(
+                lookahead_cfg, "min_keep_per_group", 1
+            ),
+            lookahead_tied_return_eps=getattr(
+                lookahead_cfg, "tied_return_eps", 1e-3
+            ),
+            lookahead_add_random_keep=getattr(
+                lookahead_cfg, "add_random_keep", False
+            ),
+            lookahead_random_keep_count=getattr(
+                lookahead_cfg, "random_keep_count", 0
+            ),
         )
 
 
@@ -562,7 +578,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
         import time
         self.start_time = time.time()
         for step in range(self.total_training_steps):
-            # metrics = {}
+            metrics = {}
             timing_raw = {}
 
             batch: DataProto = DataProto()
@@ -573,9 +589,6 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                 with marked_timer("gen", timing_raw):
                     batch = self.agent_proxy.rollout(batch, val=False)
 
-                    # Filter first, then adjust batch size
-                    batch, metrics = self.rollout_filter.filter(batch)
-
                     # Adjust batch size to be divisible by num_groups, ppo_mini_batch_size, and n_gpus
                     num_groups = self.config.es_manager.train.env_groups
                     ppo_mini_batch_size = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
@@ -584,16 +597,6 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                     adjust_mode = getattr(self.config.agent_proxy, "batch_adjust_mode", "copy")
                     batch = adjust_batch(batch, size_divisor, mode=adjust_mode)
 
-                    # Record batch and mini-batch statistics
-                    batch_size = batch.batch["input_ids"].shape[0]
-                    num_mini_batches = batch_size // ppo_mini_batch_size
-                    metrics.update({
-                        "train/batch_size": batch_size,
-                        "train/num_mini_batches": num_mini_batches,
-                    })
-                    metrics.update({"train/" + key: value for key, value in batch.meta_info["metrics"].items()})
-
-                    inputs, outputs, scores = _process_batch_for_logging(batch)
                 if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                     raise NotImplementedError("REMAX is not supported")
 
@@ -689,6 +692,34 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                         bi_level_gae=self.config.algorithm.bi_level_gae,
                     )
 
+                critic_batch = batch
+                batch = deepcopy(batch)
+                batch, filter_metrics = self.rollout_filter.filter(batch)
+                batch = adjust_batch(batch, size_divisor, mode=adjust_mode)
+                metrics.update(filter_metrics)
+
+                if reward_extra_infos_dict:
+                    reward_extra_infos_dict = {
+                        key: (
+                            value.tolist()
+                            if isinstance(value, np.ndarray)
+                            else value
+                        )
+                        for key in reward_extra_infos_dict
+                        if (value := batch.non_tensor_batch.get(key)) is not None
+                    }
+
+                batch_size = batch.batch["input_ids"].shape[0]
+                metrics.update({
+                    "train/batch_size": batch_size,
+                    "train/num_mini_batches": batch_size // ppo_mini_batch_size,
+                })
+                metrics.update({
+                    "train/" + key: value
+                    for key, value in batch.meta_info["metrics"].items()
+                })
+                inputs, outputs, scores = _process_batch_for_logging(batch)
+
                 if self.config.algorithm.adv_estimator == AdvantageEstimator.GRPO and self.config.grpo_advantage_length_weight:
                     response_mask = batch.batch["response_mask"]
                     advantages = batch.batch["advantages"]
@@ -699,7 +730,7 @@ class RayAgentTrainer(VerlRayPPOTrainer):
                 # update critic
                 if self.use_critic:
                     with marked_timer("update_critic", timing_raw, color="pink"):
-                        critic_output = self.critic_wg.update_critic(batch)
+                        critic_output = self.critic_wg.update_critic(critic_batch)
                     critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                     metrics.update(critic_output_metrics)
 

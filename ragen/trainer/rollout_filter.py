@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
+import math
 import numpy as np
 import torch
 
@@ -20,6 +21,12 @@ class RolloutFilterConfig:
     group_size: int
     num_groups: int
     metric: str = "reward_variance"
+    lookahead_enabled: bool = False
+    lookahead_keep_ratio: float = 0.25
+    lookahead_min_keep_per_group: int = 1
+    lookahead_tied_return_eps: float = 1e-3
+    lookahead_add_random_keep: bool = False
+    lookahead_random_keep_count: int = 0
 
 
 class RolloutFilter:
@@ -115,6 +122,103 @@ class RewardRolloutFilter(RolloutFilter):
 
     _METRIC_OPTIONS = {"reward", "reward_variance"}
 
+    def _apply_tsr_lookahead(
+        self,
+        batch: DataProto,
+        reward_scores: torch.Tensor,
+        group_size: int,
+    ) -> Tuple[DataProto, Dict[str, torch.Tensor]]:
+        config = self.config
+        keep_count = max(
+            config.lookahead_min_keep_per_group,
+            math.ceil(config.lookahead_keep_ratio * group_size),
+        )
+        keep_count = min(keep_count, group_size)
+        num_groups = reward_scores.shape[0]
+        episode_mask = torch.zeros(
+            num_groups * group_size,
+            dtype=torch.bool,
+            device=reward_scores.device,
+        )
+
+        deviations = torch.abs(
+            reward_scores - reward_scores.mean(dim=-1, keepdim=True)
+        )
+        group_std = reward_scores.std(dim=-1)
+        for group_id in range(num_groups):
+            offset = group_id * group_size
+            group_scores = deviations[group_id]
+            if group_std[group_id] < config.lookahead_tied_return_eps:
+                group_scores = torch.rand_like(group_scores)
+            ranked = torch.argsort(group_scores, descending=True)
+            episode_mask[offset + ranked[:keep_count]] = True
+
+            if config.lookahead_add_random_keep and config.lookahead_random_keep_count > 0:
+                remaining = ranked[keep_count:]
+                extra_count = min(
+                    config.lookahead_random_keep_count,
+                    remaining.numel(),
+                )
+                if extra_count > 0:
+                    choice = torch.randperm(
+                        remaining.numel(), device=reward_scores.device
+                    )[:extra_count]
+                    episode_mask[offset + remaining[choice]] = True
+
+        group_mask = episode_mask.view(num_groups, group_size)
+        kept_counts = group_mask.sum(dim=1).float()
+        kept_rewards = reward_scores[group_mask]
+        dropped_rewards = reward_scores[~group_mask]
+        metrics = {
+            "rollout/tsr_lookahead_keep_ratio": torch.tensor(
+                config.lookahead_keep_ratio
+            ),
+            "rollout/tsr_lookahead_keep_count": torch.tensor(keep_count),
+            "rollout/tsr_lookahead_kept_fraction": (
+                kept_counts.mean() / float(group_size)
+            ),
+            "rollout/tsr_lookahead_kept_per_group_mean": kept_counts.mean(),
+            "rollout/tsr_lookahead_kept_per_group_std": kept_counts.std(
+                unbiased=False
+            ),
+            "rollout/tsr_lookahead_kept_per_group_min": kept_counts.min(),
+            "rollout/tsr_lookahead_kept_per_group_max": kept_counts.max(),
+        }
+        if kept_rewards.numel() > 0:
+            metrics["rollout/tsr_lookahead_kept_reward_mean"] = kept_rewards.mean()
+            metrics["rollout/tsr_lookahead_kept_reward_std"] = kept_rewards.std(
+                unbiased=False
+            )
+        if dropped_rewards.numel() > 0:
+            metrics["rollout/tsr_lookahead_dropped_reward_mean"] = dropped_rewards.mean()
+            metrics["rollout/tsr_lookahead_dropped_reward_std"] = dropped_rewards.std(
+                unbiased=False
+            )
+        if kept_rewards.numel() > 0 and dropped_rewards.numel() > 0:
+            metrics["rollout/tsr_lookahead_reward_mean_difference"] = (
+                kept_rewards.mean() - dropped_rewards.mean()
+            )
+
+        if (
+            batch.non_tensor_batch is not None
+            and "episode_ids" in batch.non_tensor_batch
+        ):
+            episode_ids = batch.non_tensor_batch["episode_ids"]
+            unique_episodes = list(dict.fromkeys(episode_ids))
+            selected_episodes = {
+                episode_id
+                for episode_id, keep in zip(unique_episodes, episode_mask.cpu().tolist())
+                if keep
+            }
+            batch_mask = torch.tensor(
+                [episode_id in selected_episodes for episode_id in episode_ids],
+                dtype=torch.bool,
+            )
+        else:
+            batch_mask = episode_mask
+
+        return self._apply_mask(batch, batch_mask), metrics
+
     def __init__(self, config: RolloutFilterConfig) -> None:
         super().__init__(config)
         if config.metric not in self._METRIC_OPTIONS:
@@ -138,6 +242,8 @@ class RewardRolloutFilter(RolloutFilter):
             batch.non_tensor_batch is not None
             and "episode_ids" in batch.non_tensor_batch
         )
+        episode_ids = None
+        unique_episodes = None
 
         if has_episode_ids:
             # Turn-level mode: aggregate by episode first
@@ -197,12 +303,7 @@ class RewardRolloutFilter(RolloutFilter):
             }
         )
 
-        if rollout_filter_ratio >= 1:
-            return batch, metrics
-
         if has_episode_ids:
-            # Build mask for turn-level samples based on selected groups
-            # First, find which episodes belong to selected groups
             selected_episodes = set()
             for gid in top_groups.cpu().tolist():
                 start_ep = gid * group_size
@@ -210,7 +311,6 @@ class RewardRolloutFilter(RolloutFilter):
                 for ep_idx in range(start_ep, end_ep):
                     selected_episodes.add(unique_episodes[ep_idx])
 
-            # Build turn-level mask
             mask = torch.tensor(
                 [episode_ids[i] in selected_episodes for i in range(len(episode_ids))],
                 dtype=torch.bool
@@ -218,7 +318,18 @@ class RewardRolloutFilter(RolloutFilter):
         else:
             mask = self._groups_to_mask(top_groups, group_size)
 
-        batch = self._apply_mask(batch, mask)
+        if rollout_filter_ratio < 1:
+            batch = self._apply_mask(batch, mask)
+            rm_scores = rm_scores[torch.sort(top_groups).values]
+            group_size = rm_scores.shape[1]
+
+        if self.config.lookahead_enabled:
+            batch, lookahead_metrics = self._apply_tsr_lookahead(
+                batch,
+                rm_scores,
+                group_size,
+            )
+            metrics.update(lookahead_metrics)
 
         return batch, metrics
 
@@ -364,6 +475,12 @@ def build_rollout_filter(
     group_size: int,
     metric: Optional[str],
     compute_log_prob: Optional[Callable[[DataProto], DataProto]] = None,
+    lookahead_enabled: bool = False,
+    lookahead_keep_ratio: float = 0.25,
+    lookahead_min_keep_per_group: int = 1,
+    lookahead_tied_return_eps: float = 1e-3,
+    lookahead_add_random_keep: bool = False,
+    lookahead_random_keep_count: int = 0,
 ) -> RolloutFilter:
     metric = (metric or "reward_variance").lower()
     metric = {
@@ -377,6 +494,12 @@ def build_rollout_filter(
         num_groups=num_groups,
         group_size=group_size,
         metric=metric,
+        lookahead_enabled=lookahead_enabled,
+        lookahead_keep_ratio=lookahead_keep_ratio,
+        lookahead_min_keep_per_group=lookahead_min_keep_per_group,
+        lookahead_tied_return_eps=lookahead_tied_return_eps,
+        lookahead_add_random_keep=lookahead_add_random_keep,
+        lookahead_random_keep_count=lookahead_random_keep_count,
     )
 
     if metric in {"reward", "reward_variance"}:

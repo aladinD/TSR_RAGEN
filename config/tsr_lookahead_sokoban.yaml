@@ -1,0 +1,19 @@
+defaults:
+  - sokoban
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    rollout_filter_ratio: 0.5
+
+tsr_lookahead:
+  enabled: true
+  keep_ratio: 0.5
+  min_keep_per_group: 1
+  tied_return_eps: 1e-3
+  add_random_keep: false
+  random_keep_count: 0
+
+trainer:
+  experiment_name: tsr_lookahead_sokoban
+  default_local_dir: results/checkpoints/tsr_lookahead_sokoban
